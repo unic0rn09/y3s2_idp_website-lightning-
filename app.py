@@ -780,6 +780,12 @@
 # import sklearn # 🚀 JETSON TLS FIX: Must be imported absolutely first
 # import torch   # 🚀 JETSON TLS FIX: Must be imported second
 
+# import sklearn # 🚀 JETSON TLS FIX: Must be imported absolutely first
+# import torch   # 🚀 JETSON TLS FIX: Must be imported second
+
+# import sklearn # 🚀 JETSON TLS FIX: Must be imported absolutely first
+# import torch   # 🚀 JETSON TLS FIX: Must be imported second
+
 import os
 os.environ["TRANSFORMERS_NO_TORCHCODEC"] = "1"
 
@@ -789,12 +795,11 @@ import subprocess
 import time
 import traceback
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, session 
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # 🚀 IMPORT FROM YOUR NEW AI ENGINE FILE
-# In app.py (Line 11)
 from ai_engine import (
     transcribe_wav, 
     run_post_consultation_pipeline, 
@@ -817,7 +822,7 @@ db = SQLAlchemy(app)
 # ============================================
 # HARDCODED AVAILABLE ROOMS — edit this list
 # ============================================
-AVAILABLE_ROOMS = ['1', '2', '3']
+AVAILABLE_ROOMS = ['1', '2', '3', '4', '5']
 
 # Database Models
 class User(db.Model):
@@ -879,19 +884,13 @@ def save_patient_data_to_folder(patient):
 
     # 1. Start inside the local 'instance' folder
     base_dir = os.path.join("instance", "patient_records")
-    
-    # 2. Extract the exact date the patient visited
     date_visited = patient.date_added.strftime("%Y-%m-%d")
-    
-    # 3. Create the nested directory: instance/patient_records/IC/Date/
     target_dir = os.path.join(base_dir, patient.ic, date_visited)
     os.makedirs(target_dir, exist_ok=True)
     
-    # 4. Simply name it as the final clinical note
     filename = "final_clinical_note.json"
     file_path = os.path.join(target_dir, filename)
         
-    # 5. Structure the data to be saved
     archive_data = {
         "metadata": {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
@@ -917,7 +916,6 @@ def save_patient_data_to_folder(patient):
         "raw_transcription": patient.transcription
     }
     
-    # 6. Save the file into the new folder structure
     with open(file_path, 'w') as f:
         json.dump(archive_data, f, indent=4)
 #--------------------------------------------------------#
@@ -928,7 +926,7 @@ def get_rooms_data():
         room_num_str = str(i)
         doc = User.query.filter_by(role='doctor', room=room_num_str).first()
         
-        # Exclude the test patient (IC: 999999-99-9999) from nurse dashboard entirely
+        # Exclude the test patient from nurse dashboard entirely
         patients_query = Patient.query.filter(
             Patient.room == room_num_str, 
             Patient.status.in_(['Waiting', 'Draft']),
@@ -942,7 +940,12 @@ def get_rooms_data():
         } for p in patients_query]
         
         if doc:
-            status = "Waiting" if patient_list else "Available"
+            # ✅ REQ 3: Incorporates Offline -> Online -> Waiting status lifecycle
+            if doc.status == 'offline':
+                status = "Offline"
+            else:
+                status = "Waiting" if patient_list else "Online"
+                
             rooms.append({"id": f"Room {i}", "room_num": room_num_str, "doctor": doc.name, "doctor_email": doc.email, "status": status, "patients": patient_list, "active": True})
         else:
             rooms.append({"id": f"Room {i}", "room_num": room_num_str, "doctor": "-", "doctor_email": "", "status": "Not Available", "patients": [], "active": False})
@@ -950,7 +953,8 @@ def get_rooms_data():
 
 @app.route('/')
 def login():
-    occupied_rooms = [u.room for u in User.query.filter_by(role='doctor', status='online').all() if u.room]
+    # ✅ REQ 2: Only empty rooms are available for the doctor to choose
+    occupied_rooms = [u.room for u in User.query.filter(User.role == 'doctor', User.room != None).all()]
     return render_template('login.html', available_rooms=AVAILABLE_ROOMS, occupied_rooms=occupied_rooms)
 
 @app.route('/login', methods=['POST'])
@@ -961,27 +965,48 @@ def do_login():
 
     if user and check_password_hash(user.password_hash, password) and user.role == request.form.get('role'):
         session['user_id'] = user.id
+        session['user_name'] = user.name # ✅ REQ 5: Sets the name dynamically for frontend displays
+        
         if user.role == 'nurse':
             return redirect(url_for('nurse_dashboard'))
+            
         elif user.role == 'doctor':
-            selected_room = request.form.get('room')
-            if selected_room:
-                # 🛡️ Reject rooms not in the available list
-                if selected_room not in AVAILABLE_ROOMS:
-                    return "Room not available", 400
-                # 🛡️ Reject rooms already occupied by another doctor
-                occupied = User.query.filter_by(role='doctor', room=selected_room, status='online').first()
-                if occupied and occupied.id != user.id:
-                    return "Room already occupied by another doctor", 400
-                user.room = selected_room
+            # ✅ REQ 4: Dr Lim exception - Always force Room 1 & Online
+            if user.email == 'doctor@test.com':
+                user.room = '1'
                 user.status = 'online'
                 db.session.commit()
+            else:
+                selected_room = request.form.get('room')
+                if selected_room:
+                    # Reject rooms not in the available list
+                    if selected_room not in AVAILABLE_ROOMS:
+                        return "Room not available", 400
+                    # Reject rooms already occupied by another doctor
+                    occupied = User.query.filter(User.role == 'doctor', User.room == selected_room, User.id != user.id).first()
+                    if occupied:
+                        return "Room already occupied by another doctor", 400
+                    
+                    # ✅ REQ 2 & 3: Lock the room to this doctor and set to online immediately
+                    user.room = selected_room
+                    user.status = 'online'
+                    db.session.commit()
             return redirect(url_for('doctor_dashboard'))
     return "Invalid email or password", 401
 
 @app.route('/logout')
 def logout():
+    # ✅ REQ 2: Releasing the room when a generic doctor logs out 
+    if 'user_id' in session:
+        user = User.query.get(session['user_id'])
+        # Dr Lim keeps his room forever, everyone else loses it upon logout
+        if user and user.role == 'doctor' and user.email != 'doctor@test.com':
+            user.room = None
+            user.status = 'offline'
+            db.session.commit()
+            
     session.pop('user_id', None)
+    session.pop('user_name', None)
     return redirect(url_for('login'))
 
 # --- NURSE ROUTES ----------
@@ -1005,19 +1030,14 @@ def register_patient():
 
 @app.route('/nurse/dashboard')
 def nurse_dashboard(): 
-    # Get today's date string to match completed patients
     today_str = datetime.now().strftime('%Y-%m-%d')
-    
-    # Fetch all real patients (excluding the automated test patient)
     all_patients = Patient.query.filter(Patient.ic != '999999-99-9999').all()
     
-    # --- FAKE DATA FOR RED & YELLOW ZONES ---
     fake_red_waiting = 8
     fake_red_completed = 15
     fake_yellow_waiting = 12
     fake_yellow_completed = 23
     
-    # --- REAL DATA FOR GREEN ZONE ---
     real_green_waiting = 0
     real_green_completed = 0
     
@@ -1025,101 +1045,82 @@ def nurse_dashboard():
         is_today = p.date_added.strftime('%Y-%m-%d') == today_str
         is_waiting = p.status in ['Waiting', 'Consulting', 'Draft']
         
-        # We assign all non-priority patients to the Green Zone
         if not p.priority:
             if is_waiting:
                 real_green_waiting += 1
             elif p.status == 'Completed' and is_today:
                 real_green_completed += 1
 
-    # Helper function to calculate progress bar percentages
     def calc_pct(waiting, completed):
         total = waiting + completed
         return int((waiting / total) * 100) if total > 0 else 0
 
-    # Build the final stats dictionary to send to the HTML
     stats = {
         'red_waiting': fake_red_waiting,
         'red_completed': fake_red_completed,
         'red_pct': calc_pct(fake_red_waiting, fake_red_completed),
-        
         'yellow_waiting': fake_yellow_waiting,
         'yellow_completed': fake_yellow_completed,
         'yellow_pct': calc_pct(fake_yellow_waiting, fake_yellow_completed),
-        
         'green_waiting': real_green_waiting,
         'green_completed': real_green_completed,
         'green_pct': calc_pct(real_green_waiting, real_green_completed),
-        
-        # Total waiting adds the fake Red/Yellow to the real Green queue
         'total_waiting': fake_red_waiting + fake_yellow_waiting + real_green_waiting
     }
 
-    return render_template('nurse_dashboard.html', rooms=get_rooms_data(), stats=stats)
+    nurse_user = db.session.get(User, session.get('user_id'))
+    return render_template('nurse_dashboard.html', rooms=get_rooms_data(), stats=stats, nurse=nurse_user)
 
 @app.route('/nurse/registration')
 def patient_registration(): 
-    # Exclude test patient from nurse history
     history = Patient.query.filter(Patient.status=='Completed', Patient.ic != '999999-99-9999').order_by(Patient.id.desc()).all()
-    return render_template('patient_registration.html', rooms=get_rooms_data(), history=history)
+    nurse_user = db.session.get(User, session.get('user_id'))
+    return render_template('patient_registration.html', rooms=get_rooms_data(), history=history, nurse=nurse_user)
 
 @app.route('/nurse/rooms')
-def all_rooms(): return render_template('all_rooms.html', rooms=get_rooms_data())
+def all_rooms(): 
+    nurse_user = db.session.get(User, session.get('user_id'))
+    return render_template('all_rooms.html', rooms=get_rooms_data(), nurse=nurse_user)
 
 @app.route('/nurse/history')
 def patient_history(): 
-    # Exclude test patient from global history
     history = Patient.query.filter(Patient.ic != '999999-99-9999').order_by(Patient.id.desc()).all()
-    return render_template('patient_history.html', history=history, rooms=get_rooms_data())
+    nurse_user = db.session.get(User, session.get('user_id'))
+    return render_template('patient_history.html', history=history, rooms=get_rooms_data(), nurse=nurse_user)
 
 @app.route('/delete_patient/<patient_id>', methods=['POST'])
 def delete_patient(patient_id):
-    # Find the patient in the database
     patient = Patient.query.get_or_404(patient_id)
-    
-    # Delete the record and save changes
     db.session.delete(patient)
     db.session.commit()
-    
-    # Refresh the page automatically so the patient disappears from the table
     return redirect(request.referrer)
 
 @app.route('/edit_patient_full/<int:patient_id>', methods=['GET', 'POST'])
 def edit_patient_full(patient_id):
-    # Fetch the patient from the database, return 404 if not found
     patient = Patient.query.get_or_404(patient_id)
-    
-    # If the nurse clicks "Save Changes" (POST request)
     if request.method == 'POST':
-        # 1. Update Basic Details
         patient.name = request.form.get('name', patient.name)
         patient.ic = request.form.get('ic', patient.ic)
         patient.age = request.form.get('age', patient.age)
         
-        # 2. Update Contact & Address
         patient.phone = request.form.get('phone', '')
         patient.email = request.form.get('email', '')
         patient.address = request.form.get('address', '')
         
-        # 3. Update Emergency Contact
         patient.emergency_name = request.form.get('emergency_name', '')
         patient.emergency_phone = request.form.get('emergency_phone', '')
         patient.emergency_relation = request.form.get('emergency_relation', '')
         
-        # Save to database
         db.session.commit()
-        
-        # Send them back to the history page
         return redirect(url_for('patient_history'))
         
-    # If they are just opening the page (GET request)
-    return render_template('edit_patient_full.html', patient=patient)
+    nurse_user = db.session.get(User, session.get('user_id'))
+    return render_template('edit_patient_full.html', patient=patient, nurse=nurse_user)
 
 @app.route('/nurse/statistics')
 def nurse_statistics(): 
     if 'user_id' not in session: return redirect(url_for('login'))
     
-    # 1. DATE MEMORY
     req_date = request.args.get('date')
     if req_date:
         session['stats_date'] = req_date
@@ -1127,16 +1128,12 @@ def nurse_statistics():
     else:
         selected_date_str = session.get('stats_date', datetime.now().strftime('%Y-%m-%d'))
     
-    # 2. Fetch ALL real patients 
     all_patients = Patient.query.order_by(Patient.date_added.desc()).all()
     
-    # --- FAKE DATA FOR RED & YELLOW ZONES ---
     fake_red_waiting = 8
     fake_red_completed = 15
     fake_yellow_waiting = 12
     fake_yellow_completed = 23
-    
-    # --- REAL DATA FOR GREEN ZONE ---
     real_green_waiting = 0
     real_green_completed = 0
     green_patients = []
@@ -1144,11 +1141,8 @@ def nurse_statistics():
     
     for p in all_patients:
         p_date_str = p.date_added.strftime('%Y-%m-%d')
-        
         if p_date_str == selected_date_str:
-            # Add all patients to the list (since you're only working in Green Zone)
             green_patients.append(p) 
-            
             is_waiting = p.status in ['Waiting', 'Consulting', 'Draft']
             if is_waiting:
                 real_green_waiting += 1
@@ -1176,11 +1170,11 @@ def nurse_statistics():
         'selected_date': selected_date_str 
     }
 
-    return render_template('statistics.html', stats=stats, green_patients=green_patients)
+    nurse_user = db.session.get(User, session.get('user_id'))
+    return render_template('statistics.html', stats=stats, green_patients=green_patients, nurse=nurse_user)
+
 
 # --- DOCTOR ROUTES -------
-
-# 🚀 THE REAL-TIME AUDIO ROUTE 
 @app.route('/api/transcribe', methods=['POST'])
 def api_transcribe():
     audio_file = request.files.get('audio')
@@ -1188,9 +1182,7 @@ def api_transcribe():
     chunk_index = request.form.get('chunk_index', '0')
     
     safe_vid = _to_safe_visit_id(patient_id)
-    # The temporary chunk WAV
     final_wav_path = os.path.join(INSTANCE_FOLDER, f"visit_{safe_vid}_chunk{chunk_index}.wav")
-    # 🚀 The Master file needed for Pyannote Diarization
     full_audio_path = os.path.join(INSTANCE_FOLDER, f"visit_{safe_vid}_full.wav")
     
     with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_webm:
@@ -1201,25 +1193,19 @@ def api_transcribe():
         if os.path.getsize(temp_webm_path) < 5000:
             return jsonify({'text': ''}), 200
 
-        # Convert chunk to WAV
         subprocess.run(['ffmpeg', '-y', '-i', temp_webm_path, '-ar', str(TARGET_SR), '-ac', '1', final_wav_path], 
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
-        # 🚀 BUILD THE FULL AUDIO FILE: Append this chunk to the master file
         if not os.path.exists(full_audio_path):
-            # First chunk: just rename it to full.wav
             subprocess.run(['ffmpeg', '-y', '-i', final_wav_path, '-c', 'copy', full_audio_path], check=True)
         else:
-            # Subsequent chunks: append to existing master
             temp_combined = os.path.join(INSTANCE_FOLDER, f"visit_{safe_vid}_temp.wav")
-            # We use the 'concat' protocol for speed on the Jetson
             subprocess.run([
                 'ffmpeg', '-y', '-i', f'concat:{full_audio_path}|{final_wav_path}', 
                 '-c', 'copy', temp_combined
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             os.replace(temp_combined, full_audio_path)
 
-        # Calls the function from ai_engine.py
         text = transcribe_wav(final_wav_path)
         return jsonify({'text': text}), 200
 
@@ -1229,7 +1215,6 @@ def api_transcribe():
     finally:
         if os.path.exists(temp_webm_path): os.remove(temp_webm_path)
         
-# 🚀 THE FAST-TRACK FINALIZATION ROUTE
 @app.route('/api/process_final_diarization', methods=['POST'])
 def process_final_diarization():
     data = request.json
@@ -1240,13 +1225,10 @@ def process_final_diarization():
     time.sleep(3)
 
     try:
-        # Run the pipeline (passing the ID so it finds the chunks)
         results = run_post_consultation_pipeline(patient_id)
         
-        # 1. Fill the 'Raw Transcription' box
         patient.transcription = results.get("labeled_transcript", "")
         
-        # 2. Fill the specific medical boxes (Untouched)
         notes = results.get("medical_notes", {})
         patient.cc = notes.get("chief_complaint", "")
         patient.hpi = notes.get("hpi", "")
@@ -1257,8 +1239,6 @@ def process_final_diarization():
         
         patient.status = 'Draft'
         db.session.commit()
-        
-        # Clean up old audio
         clear_old_audio(str(patient.id))
         
         return jsonify({"status": "success"})
@@ -1274,9 +1254,6 @@ def doctor_dashboard():
     if 'user_id' not in session: return redirect(url_for('login'))
     doctor = db.session.get(User, session.get('user_id'))
     
-    # --- AUTO RESET MOCK PATIENT ---
-    # Secretly wipe the mock patient data clean when the doctor returns to dashboard 
-    # so it does not permanently stay in the database as "Completed"
     test_p = Patient.query.filter_by(ic='999999-99-9999').first()
     if test_p and test_p.status == 'Completed':
         test_p.status = 'Waiting'
@@ -1300,7 +1277,6 @@ def doctor_dashboard():
     
     today_str = datetime.now().strftime('%Y-%m-%d')
     all_completed = Patient.query.filter_by(room=doctor.room, status='Completed').order_by(Patient.id.desc()).all()
-    # Exclude test patient from "Completed Today"
     completed_today = [p for p in all_completed if p.date_added.strftime('%Y-%m-%d') == today_str and p.ic != '999999-99-9999']
     
     return render_template('doctor_dashboard.html', doctor=doctor, queue=queue, completed_today=completed_today)
@@ -1313,20 +1289,16 @@ def toggle_status():
         db.session.commit()
     return redirect(request.referrer)
 
-#changes here#
 @app.route('/doctor/consult/<patient_id>')
 def live_consultation(patient_id):
     if 'user_id' not in session: return redirect(url_for('login'))
     patient = Patient.query.get_or_404(patient_id)
     patient.status = 'Consulting'
     db.session.commit()
-    
-    # Clean old audio using the imported function
     clear_old_audio(str(patient.id))
-    
     doctor_user = db.session.get(User, session.get('user_id'))
     return render_template('live_consultation_session.html', patient=patient, doctor=doctor_user)
-#changes here#
+
 @app.route('/doctor/cancel_live/<patient_id>')
 def cancel_live(patient_id):
     patient = Patient.query.get_or_404(patient_id)
@@ -1335,14 +1307,6 @@ def cancel_live(patient_id):
     clear_old_audio(str(patient.id))
     return redirect(url_for('doctor_dashboard'))
 
-# @app.route('/doctor/finish_live/<patient_id>', methods=['POST'])
-# def finish_live(patient_id):
-#     patient = Patient.query.get_or_404(patient_id)
-#     patient.transcription = request.form.get('transcription', '')
-#     patient.status = 'Draft'
-#     db.session.commit()
-#     return redirect(url_for('consultation_summary', patient_id=patient.id))
-
 @app.route('/doctor/summary/<patient_id>')
 def consultation_summary(patient_id):
     if 'user_id' not in session: return redirect(url_for('login'))
@@ -1350,9 +1314,6 @@ def consultation_summary(patient_id):
     current_patient = Patient.query.get_or_404(patient_id)
     doctor = User.query.get(session['user_id'])
     
-    # --- FETCH PAST REPORTS ---
-    # Match by IC, ensure status is 'Completed', and exclude the current ongoing visit
-    # .asc() ensures the oldest dates appear first as page 1
     past_records = Patient.query.filter(
         Patient.ic == current_patient.ic,
         Patient.status == 'Completed',
@@ -1363,8 +1324,6 @@ def consultation_summary(patient_id):
     for record in past_records:
         past_reports.append({
             'date': record.date_added.strftime('%Y-%m-%d'),
-            # Note: Since the Patient table doesn't explicitly save the historical doctor's name,
-            # we assign it to the current doctor or default to a generic string.
             'doctor': 'E.M.M.A.S Records', 
             'cc': record.cc,
             'hpi': record.hpi,
@@ -1420,10 +1379,8 @@ def generate_report(patient_id):
     patient.sh_others = request.form.get('sh_others', '')
     
     patient.status = 'Completed'
-    # Trigger Folder-based Data Collection (Test patient is blocked inside this function)
     save_patient_data_to_folder(patient)
     
-
     db.session.commit()
     return redirect(url_for('final_medical_note', patient_id=patient.id))
 
@@ -1434,17 +1391,14 @@ def final_medical_note(patient_id):
     current_patient = Patient.query.get_or_404(patient_id)
     doctor = User.query.get(session['user_id'])
     
-    # ✅ FIX 1: Grab the source from the URL so we can hide the dashboard button
     source = request.args.get('source', 'consultation')
     
-    # Fetch ALL completed reports for this patient's IC (The entire book)
     all_records = Patient.query.filter(
         Patient.ic == current_patient.ic,
         Patient.status == 'Completed'
     ).order_by(Patient.date_added.asc()).all()
     
     past_reports = []
-    # Find which page number corresponds to the specific report the doctor clicked
     target_page_index = 1 
     
     for index, record in enumerate(all_records, start=1):
@@ -1463,7 +1417,6 @@ def final_medical_note(patient_id):
             'meds': record.meds,
             'allergies': record.allergies,
             
-            # ✅ FIX 2: Added Social History and Vitals so they don't appear blank!
             'sh_occupation': record.sh_occupation,
             'sh_living': record.sh_living,
             'sh_smoking': record.sh_smoking,
@@ -1482,13 +1435,12 @@ def final_medical_note(patient_id):
                            doctor=doctor, 
                            past_reports=past_reports,
                            target_page=target_page_index,
-                           source=source) # ✅ FIX 3: Passed the source to the HTML
+                           source=source)
 
 @app.route('/doctor/history')
 def consultation_history():
     if 'user_id' not in session: return redirect(url_for('login'))
     doctor = User.query.get(session['user_id'])
-    # Exclude test patient from doctor history
     history = Patient.query.filter(Patient.status=='Completed', Patient.ic != '999999-99-9999').order_by(Patient.id.desc()).all()
     return render_template('consultation_history.html', history=history, doctor=doctor)
 
@@ -1502,17 +1454,12 @@ def mock_consultation():
 # ==========================================
 @app.route('/api/translate', methods=['POST'])
 def api_translate():
-    # Optional security check
-    # if session.get("role") != "doctor":
-    #     return jsonify({"success": False, "error": "Unauthorized"}), 403
-        
     data = request.json
     raw_text = data.get("text", "")
     
     if not raw_text:
         return jsonify({"success": False, "error": "No text provided"}), 400
         
-    # Calls your new GPT translation function
     translated_text = translate_rojak(raw_text)
     
     if translated_text:
@@ -1527,10 +1474,9 @@ def api_structure():
     if not text:
         return jsonify({})
     
-    # Calls your GPT-4o-mini structuring mode
     _, _, structured = process_clinical_tasks(text, mode="structure")
     return jsonify(structured)
-#==================================================================================
+
 #-------help and feedback route------------
 @app.route('/help_feedback')
 def help_feedback():
@@ -1540,25 +1486,45 @@ def help_feedback():
 def submit_feedback():
     topic = request.form.get('topic')
     message = request.form.get('message')
-    
-    # Send a flash message back to the user to confirm success
     flash("Thank you! Your feedback has been sent to the development team.", "success")
     return redirect(url_for('help_feedback'))
-#--------------------------------------------
 
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-        if not User.query.filter_by(email='nurse@test.com').first():
-            db.session.add(User(name="Nurse Joy", email='nurse@test.com', password_hash=generate_password_hash('nurse123'), role='nurse'))
-        if not User.query.filter_by(email='doctor@test.com').first():
-            db.session.add(User(name="Lim", email='doctor@test.com', password_hash=generate_password_hash('doctor123'), role='doctor', status='online', room='1'))
+        
+        # ==============================================================
+        # ✅ REQ 1: ONLY NAME, EMAIL, PASSWORD, ROLE are hardcoded here.
+        # ==============================================================
+        demo_users = [
+            {"name": "Nurse Joy", "email": "nurse@test.com", "password": "nurse123", "role": "nurse"},
+            {"name": "Dr. Lim", "email": "doctor@test.com", "password": "doctor123", "role": "doctor"},
+            {"name": "Dr. Smith", "email": "smith@test.com", "password": "smith123", "role": "doctor"},
+            {"name": "Dr. Ali", "email": "ali@test.com", "password": "ali123", "role": "doctor"}
+        ]
+
+        for u in demo_users:
+            if not User.query.filter_by(email=u['email']).first():
+                new_user = User(
+                    name=u['name'],
+                    email=u['email'],
+                    password_hash=generate_password_hash(u['password']),
+                    role=u['role'],
+                    status='offline',
+                    room=None # Initialize with NO ROOM assigned
+                )
+                
+                # ✅ REQ 4: Dr. Lim Exception (Force Room 1 & Online default)
+                if u['email'] == 'doctor@test.com':
+                    new_user.room = '1'
+                    new_user.status = 'online'
+                    
+                db.session.add(new_user)
+        
         db.session.commit()
         
         # ==============================================================
         # ⬇️ TEST PATIENT CREATION TOGGLE ⬇️
-        # Uncomment the lines below to spawn the test patient on startup.
-        # Leave them commented out to run the app normally.
         # ==============================================================
         test_patient = Patient.query.filter_by(ic='999999-99-9999').first()
         if not test_patient:
@@ -1567,6 +1533,5 @@ if __name__ == '__main__':
         else:
             test_patient.status = 'Waiting'
         db.session.commit()
-        # ==============================================================
         
     app.run(host='0.0.0.0', port=5000, debug=True)
