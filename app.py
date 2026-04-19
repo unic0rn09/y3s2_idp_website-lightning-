@@ -1164,10 +1164,16 @@ def cancel_live(patient_id):
 @app.route('/doctor/summary/<patient_id>')
 def consultation_summary(patient_id):
     if 'user_id' not in session: return redirect(url_for('login'))
+    
     current_patient = Patient.query.get_or_404(patient_id)
     doctor = User.query.get(session['user_id'])
     
-    # ✅ Grab all doctors for the Referral modal
+    # 🚀 SAFETY CHECK: If the database was reset but the browser cookie is old, force logout
+    if not doctor:
+        session.pop('user_id', None)
+        return redirect(url_for('login'))
+    
+    # Grab all doctors for the Referral modal
     all_doctors = User.query.filter(User.role == 'doctor', User.id != doctor.id).all()
     
     past_records = Patient.query.filter(Patient.ic == current_patient.ic, Patient.status == 'Completed', Patient.id != current_patient.id).order_by(Patient.date_added.asc()).all()
